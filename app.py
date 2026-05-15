@@ -191,14 +191,11 @@ def fill_sku_into_original(file_bytes, color_rows, season_c, year_c):
 
     for row_num, product, color_name in color_rows:
         abbr, _ = get_color_abbr(color_name)
-        # 사이즈별 SKU를 줄바꿈으로 연결해서 C열에 입력
-        skus = [
-            f"{season_c}{year_c}{product['category_code']}{product['style_no']}{abbr}{sz}"
-            for sz in SIZE_COLS
-        ]
+        # 사이즈 없이 SKU 베이스만 C열에 입력
+        sku_base = f"{season_c}{year_c}{product['category_code']}{product['style_no']}{abbr}"
         cell = ws.cell(row=row_num, column=c_col_idx)
-        cell.value = "\n".join(skus)
-        cell.alignment = Alignment(wrap_text=True, vertical="top")
+        cell.value = sku_base
+        cell.alignment = Alignment(vertical="center")
 
     buf = BytesIO()
     wb.save(buf)
