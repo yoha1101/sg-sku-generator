@@ -2,9 +2,9 @@ import streamlit as st
 import pandas as pd
 import re
 import json
+import os
 from io import BytesIO
-from copy import copy
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
@@ -15,43 +15,34 @@ SEASON_CODE  = {"SS (봄/여름)": "S", "FW (가을/겨울)": "F", "SNOW (스노
 YEAR_OPTIONS = [str(y) for y in range(25, 33)]
 
 CATEGORY_MAP = {
-    "OUTER":  "OT", "PANTS": "BT", "TOP": "TP",
-    "TEE":    "TP", "HAT":   "HW", "ACC": "AC", "GLOVES": "GV",
+    "OUTER": "OT", "PANTS": "BT", "TOP": "TP",
+    "TEE":   "TP", "HAT":   "HW", "ACC": "AC", "GLOVES": "GV",
 }
 
 SIZE_COLS = ["S", "M", "L", "XL", "2XL", "3XL"]
 
-# 기본 컬러 약자 (소문자 키로 저장)
-DEFAULT_COLOR_ABBR = {
-    "almond oil": "AO", "antique bronze": "AB", "azo yellow deep": "YD",
-    "biscotti": "BC", "black": "BK", "black forest": "BF",
-    "bleached sand / dark gray": "SG", "burgundy": "BD", "burnt ochre": "BO",
-    "caribbean sea": "CS", "charcoal art": "CA", "chocolate chip": "CC",
-    "citadel": "CD", "cloud cream": "CC", "cloud dancer": "CD",
-    "dark gray": "DG", "dark gray / process blue": "GB", "dark grey": "DG",
-    "dark gull gray": "DG", "dark olive": "DO", "deep lichen green": "DG",
-    "deep teal": "DT", "discreet mauve": "DM", "dusty pink": "DP",
-    "emerald": "EM", "faded rose": "FR", "gray camo": "GC",
-    "green essence": "GE", "grey green": "GG",
-    "ivory": "IV", "kelly green": "KG", "khaki beige": "KB",
-    "light grey": "LG", "marsala": "MA", "midnight blue": "MB",
-    "naval academy": "NA", "navy": "NV", "old rose": "OR",
-    "overland trek": "OT", "pale khaki": "PK", "perfect pear": "PP",
-    "pinkoi navy": "PN", "pistachio shell": "PS", "process blue": "PB",
-    "sage green": "SG", "steel gray": "SG", "tourmaline": "TM",
-    "ultra violet": "UV", "vineyard green": "VG", "warm gray": "WG",
-    "white": "WH", "white camo": "WC", "winter sky": "WS",
-    "winter white / matcha": "WM", "blue wing teal": "BT", "bog": "BG",
-    "downtown brown": "DB", "glazed ginger": "GI", "lavender menace": "LM",
-    "moonlight blue": "ML", "petrol blue": "PT", "smoke green": "SK",
-    "succulent": "SC", "vivid blue": "VB", "winetasting": "WT",
-}
+COLOR_MAP_PATH = os.path.join(os.path.dirname(__file__), "color_map.json")
 
-# ── 세션 상태: 컬러 매핑 ──────────────────────────────────────────────
+
+# ── color_map.json 로드/저장 ──────────────────────────────────────────
+def load_color_map():
+    try:
+        with open(COLOR_MAP_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_color_map(data):
+    with open(COLOR_MAP_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+# ── 세션 상태 초기화 ──────────────────────────────────────────────────
 if "color_abbr" not in st.session_state:
-    st.session_state.color_abbr = dict(DEFAULT_COLOR_ABBR)
+    st.session_state.color_abbr = load_color_map()
 
 
+# ── 컬러 약자 조회 ────────────────────────────────────────────────────
 def get_color_abbr(color_name):
     key = color_name.strip().lower()
     if key in st.session_state.color_abbr:
@@ -98,17 +89,20 @@ def parse_product_list(file_bytes):
 
     products        = []
     current_product = None
-    # 행번호도 같이 저장 (원본 파일에 다시 쓰기 위해)
-    color_rows = []  # [(row_number, product, color)]
+    color_rows      = []
 
     for row_idx, row in enumerate(ws.iter_rows(values_only=True), 1):
-        if row_idx < header_row_idx + 1:
+        if row_idx <= header_row_idx:
             continue
-        cat   = row[col.get("CATEGORY",     0)]
-        name  = row[col.get("PRODUCT NAME", 1)]
-        color = row[col.get("COLOR",        3)]
 
-        if cat and name is None:
+        cat_raw = row[col.get("CATEGORY",     0)]
+        name    = row[col.get("PRODUCT NAME", 1)]
+        color   = row[col.get("COLOR",        3)]
+
+        # A열 줄바꿈 처리: "OUTER\nCOAT" -> "OUTER"
+        cat = str(cat_raw).split("\n")[0].strip() if cat_raw else None
+
+        if cat and name is None and color is None:
             continue
 
         if cat and name and cat in CATEGORY_MAP:
@@ -123,6 +117,9 @@ def parse_product_list(file_bytes):
             if color:
                 current_product["colors"].append({"color": str(color).strip(), "sizes": _read_sizes(row, col)})
                 color_rows.append((row_idx, current_product, str(color).strip()))
+
+        elif cat and name and cat not in CATEGORY_MAP:
+            current_product = None
 
         elif current_product is not None and not cat and color:
             current_product["colors"].append({"color": str(color).strip(), "sizes": _read_sizes(row, col)})
@@ -152,10 +149,7 @@ def generate_rows(products, season_c, year_c):
             color_name  = c["color"]
             abbr, known = get_color_abbr(color_name)
             if not known:
-                warnings.append(
-                    f"⚠️ **{p['product_name']}** — '{color_name}' 약자 미등록 → "
-                    f"**{abbr}** 자동 생성 (확인 필요)"
-                )
+                warnings.append(f"'{color_name}' → **{abbr}** 자동생성 (등록 필요)")
             for sz in SIZE_COLS:
                 sku = f"{season_c}{year_c}{p['category_code']}{p['style_no']}{abbr}{sz}"
                 rows.append({
@@ -169,14 +163,9 @@ def generate_rows(products, season_c, year_c):
 
 # ── 원본 파일에 SKU 채워넣기 ──────────────────────────────────────────
 def fill_sku_into_original(file_bytes, color_rows, season_c, year_c):
-    """
-    원본 엑셀의 D열(COLOR)이 있는 행의 C열(STYLE NO.)에
-    SKU를 채워넣어 반환
-    """
     wb = load_workbook(BytesIO(file_bytes))
     ws = wb.active
 
-    # 헤더 행에서 C열 인덱스 확인
     header_row_idx = None
     for i, row in enumerate(ws.iter_rows(values_only=True), 1):
         if row[0] == "CATEGORY":
@@ -187,11 +176,10 @@ def fill_sku_into_original(file_bytes, color_rows, season_c, year_c):
         min_row=header_row_idx, max_row=header_row_idx, values_only=True
     ))[0]
     col = {v: i for i, v in enumerate(headers) if v is not None}
-    c_col_idx = col.get("STYLE NO.", 3) + 1  # openpyxl은 1-based
+    c_col_idx = col.get("STYLE NO.", 2) + 1  # 1-based
 
     for row_num, product, color_name in color_rows:
         abbr, _ = get_color_abbr(color_name)
-        # 사이즈 없이 SKU 베이스만 C열에 입력
         sku_base = f"{season_c}{year_c}{product['category_code']}{product['style_no']}{abbr}"
         cell = ws.cell(row=row_num, column=c_col_idx)
         cell.value = sku_base
@@ -224,7 +212,7 @@ with tab_main:
         year_sel   = st.selectbox("년도", YEAR_OPTIONS, index=4)
         season_c   = SEASON_CODE[season_sel]
         year_c     = year_sel
-        st.markdown(f"**SKU 접두: `{season_c}{year_c}`** — 예) `{season_c}{year_c}OT132BKXL`")
+        st.markdown(f"**SKU 접두: `{season_c}{year_c}`** — 예) `{season_c}{year_c}OT1001BKXL`")
 
         st.divider()
         st.subheader("② 파일 업로드")
@@ -238,7 +226,7 @@ with tab_main:
 **생성 규칙**
 ```
 [시즌][년도][카테고리][스타일번호][컬러약자][사이즈]
-예: W29OT132BKXL
+예: S27OT1001BKXL
 ```
 | 파일 카테고리 | SKU 코드 |
 |---|---|
@@ -266,9 +254,9 @@ with tab_main:
                 df_result, warnings = generate_rows(products, season_c, year_c)
 
                 if warnings:
-                    with st.expander(f"⚠️ 컬러 약자 경고 {len(warnings)}건"):
+                    with st.expander(f"⚠️ 미등록 컬러 {len(warnings)}건 — 컬러 약자 관리 탭에서 추가하세요"):
                         for w in warnings:
-                            st.markdown(w)
+                            st.markdown(f"- {w}")
 
                 st.subheader(f"생성된 SKU — {len(df_result)}개")
                 st.dataframe(
@@ -281,7 +269,6 @@ with tab_main:
                 dl_col1, dl_col2 = st.columns(2)
 
                 with dl_col1:
-                    # 원본 파일에 SKU 채워서 다운로드
                     filled_buf = fill_sku_into_original(file_bytes, color_rows, season_c, year_c)
                     st.download_button(
                         label="📥 원본 파일에 SKU 채워서 다운로드",
@@ -294,26 +281,23 @@ with tab_main:
                     st.caption("원본 포맷 유지 + C열에 SKU 입력")
 
                 with dl_col2:
-                    # SKU 리스트만 별도 엑셀
-                    from openpyxl import Workbook
-                    from openpyxl.styles import Font as XFont, PatternFill as XFill
                     wb2 = Workbook(); ws2 = wb2.active; ws2.title = "SKU List"
-                    hf = XFont(bold=True, color="FFFFFF", name="Arial", size=10)
-                    hb = PatternFill("solid", fgColor="111111")
+                    hf  = Font(bold=True, color="FFFFFF", name="Arial", size=10)
+                    hb  = PatternFill("solid", fgColor="111111")
+                    thin = Side(style="thin", color="DDDDDD")
+                    brd  = Border(left=thin, right=thin, top=thin, bottom=thin)
+                    alt  = PatternFill("solid", fgColor="F7F7F7")
                     headers2 = ["SKU","CATEGORY","PRODUCT NAME","STYLE NO.","COLOR","컬러약자","SIZE"]
                     widths2  = [28,10,46,10,22,10,8]
                     for ci,(h,w) in enumerate(zip(headers2,widths2),1):
-                        c2 = ws2.cell(row=1,column=ci,value=h)
+                        c2=ws2.cell(row=1,column=ci,value=h)
                         c2.font=hf; c2.fill=hb
                         c2.alignment=Alignment(horizontal="center",vertical="center")
                         ws2.column_dimensions[get_column_letter(ci)].width=w
-                    thin = Side(style="thin", color="DDDDDD")
-                    brd  = Border(left=thin,right=thin,top=thin,bottom=thin)
-                    alt  = PatternFill("solid",fgColor="F7F7F7")
                     for ri,row in df_result.iterrows():
                         r=ri+2
-                        for ci,col_name in enumerate(headers2,1):
-                            cell=ws2.cell(row=r,column=ci,value=row[col_name])
+                        for ci,cn in enumerate(headers2,1):
+                            cell=ws2.cell(row=r,column=ci,value=row[cn])
                             cell.font=Font(name="Courier New" if ci==1 else "Arial",size=10,bold=ci==1)
                             cell.alignment=Alignment(horizontal="center" if ci in [1,2,4,6,7] else "left",vertical="center")
                             cell.border=brd
@@ -333,7 +317,6 @@ with tab_main:
 # ── Tab 2: 컬러 약자 관리 ────────────────────────────────────────────
 with tab_color:
     st.subheader("컬러 약자 관리")
-    st.caption("추가/수정/삭제한 내용은 이 세션에서만 유지돼요. 앱을 새로고침하면 초기화됩니다.")
 
     c1, c2, c3 = st.columns(3)
 
@@ -342,9 +325,10 @@ with tab_color:
         st.markdown("**➕ 추가**")
         new_color = st.text_input("컬러명", placeholder="예: Croissant", key="new_color")
         new_abbr  = st.text_input("약자 (2자)", placeholder="예: CS", max_chars=3, key="new_abbr").upper()
-        if st.button("추가", use_container_width=True):
+        if st.button("추가", use_container_width=True, key="btn_add"):
             if new_color and new_abbr:
                 st.session_state.color_abbr[new_color.strip().lower()] = new_abbr
+                save_color_map(st.session_state.color_abbr)
                 st.success(f"✅ '{new_color}' → {new_abbr} 추가됨")
                 st.rerun()
             else:
@@ -354,23 +338,32 @@ with tab_color:
     with c2:
         st.markdown("**✏️ 수정**")
         abbr_display = {k: v for k, v in sorted(st.session_state.color_abbr.items())}
-        edit_color = st.selectbox("수정할 컬러", list(abbr_display.keys()), key="edit_sel",
-                                  format_func=lambda k: f"{k.title()} ({abbr_display[k]})")
-        edit_abbr  = st.text_input("새 약자", value=abbr_display.get(edit_color,""), max_chars=3, key="edit_abbr").upper()
-        if st.button("수정", use_container_width=True):
+        edit_color = st.selectbox(
+            "수정할 컬러", list(abbr_display.keys()), key="edit_sel",
+            format_func=lambda k: f"{k.title()} ({abbr_display[k]})"
+        )
+        edit_abbr = st.text_input(
+            "새 약자", value=abbr_display.get(edit_color, ""),
+            max_chars=3, key="edit_abbr"
+        ).upper()
+        if st.button("수정", use_container_width=True, key="btn_edit"):
             if edit_abbr:
                 st.session_state.color_abbr[edit_color] = edit_abbr
+                save_color_map(st.session_state.color_abbr)
                 st.success(f"✅ '{edit_color.title()}' → {edit_abbr} 수정됨")
                 st.rerun()
 
     # ── 삭제 ──
     with c3:
         st.markdown("**🗑️ 삭제**")
-        del_color = st.selectbox("삭제할 컬러", list(abbr_display.keys()), key="del_sel",
-                                 format_func=lambda k: f"{k.title()} ({abbr_display[k]})")
-        if st.button("삭제", type="secondary", use_container_width=True):
+        del_color = st.selectbox(
+            "삭제할 컬러", list(abbr_display.keys()), key="del_sel",
+            format_func=lambda k: f"{k.title()} ({abbr_display[k]})"
+        )
+        if st.button("삭제", type="secondary", use_container_width=True, key="btn_del"):
             if del_color in st.session_state.color_abbr:
                 del st.session_state.color_abbr[del_color]
+                save_color_map(st.session_state.color_abbr)
                 st.success(f"🗑️ '{del_color.title()}' 삭제됨")
                 st.rerun()
 
@@ -383,9 +376,3 @@ with tab_color:
         for k, v in sorted(st.session_state.color_abbr.items())
     ])
     st.dataframe(color_df, use_container_width=True, height=500)
-
-    # ── 초기화 ──
-    if st.button("🔄 기본값으로 초기화", type="secondary"):
-        st.session_state.color_abbr = dict(DEFAULT_COLOR_ABBR)
-        st.success("초기화됐어요.")
-        st.rerun()
